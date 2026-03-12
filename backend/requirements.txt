@@ -1,0 +1,18 @@
+fastapi>=0.115.5
+uvicorn[standard]>=0.34.0
+websockets>=13.1
+python-dotenv>=1.0.1
+pydantic>=2.10.0
+
+# Google AI — no pins, let pip resolve all transitive deps cleanly
+google-genai>=1.0.0
+google-adk>=1.0.0
+
+# Browser automation
+playwright==1.49.0
+
+# Image processing
+Pillow>=11.0.0
+
+# Async / HTTP
+httpx>=0.28.0
