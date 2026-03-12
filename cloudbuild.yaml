@@ -1,0 +1,92 @@
+# Google Cloud Build — CI/CD pipeline for ARIA
+# Triggered on push to main branch.
+# Builds both services, pushes to Artifact Registry, deploys to Cloud Run.
+
+substitutions:
+  _REGION: us-central1
+  _BACKEND_SERVICE: aria-backend
+  _FRONTEND_SERVICE: aria-frontend
+  _REPO: aria
+
+steps:
+  # ── 1. Build backend image ──────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-backend
+    args:
+      - build
+      - -t
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_BACKEND_SERVICE}:${SHORT_SHA}"
+      - -t
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_BACKEND_SERVICE}:latest"
+      - ./backend
+
+  # ── 2. Build frontend image ─────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-frontend
+    args:
+      - build
+      - -t
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_FRONTEND_SERVICE}:${SHORT_SHA}"
+      - -t
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_FRONTEND_SERVICE}:latest"
+      - ./frontend
+
+  # ── 3. Push images ──────────────────────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-backend
+    args:
+      - push
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_BACKEND_SERVICE}"
+    waitFor: [build-backend]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-frontend
+    args:
+      - push
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_FRONTEND_SERVICE}"
+    waitFor: [build-frontend]
+
+  # ── 4. Deploy backend to Cloud Run ──────────────────────────────────────────
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: deploy-backend
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - "${_BACKEND_SERVICE}"
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_BACKEND_SERVICE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --memory=2Gi
+      - --cpu=2
+      - --concurrency=10
+      - --timeout=3600
+      - --set-env-vars=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${_REGION},BROWSER_HEADLESS=true
+      - --set-secrets=GOOGLE_API_KEY=aria-google-api-key:latest
+    waitFor: [push-backend]
+
+  # ── 5. Deploy frontend to Cloud Run ─────────────────────────────────────────
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: deploy-frontend
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - "${_FRONTEND_SERVICE}"
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_FRONTEND_SERVICE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --memory=256Mi
+      - --cpu=1
+    waitFor: [push-frontend]
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_BACKEND_SERVICE}:${SHORT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_FRONTEND_SERVICE}:${SHORT_SHA}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
