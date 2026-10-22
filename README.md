@@ -147,7 +147,11 @@ python main.py
 # Tests (no API key or network needed)
 pip install -r requirements-dev.txt
 pytest
+# + real-browser tests: ARIA_TEST_BROWSER=1 pytest
 ```
+
+On startup the backend checks the API key and model names; problems show in the
+logs, in `/api/health` (`gemini_status`) and as a toast in the UI.
 
 > If Playwright cannot download Chromium on your machine, point
 > `BROWSER_EXECUTABLE_PATH` at an existing Chromium/Chrome binary.
@@ -212,6 +216,20 @@ backend runs as a single instance.
 - Screenshots captured every 2s and sent alongside voice for context
 - ARIA responds with both text transcript and synthesized voice
 
+### Voice that acts — and reports back
+Gemini Live decides by itself when a request needs the browser: it calls its
+`execute_browser_task` tool, the ADK agent does the work, and ARIA tells you
+the result out loud. Long conversations survive the Live API's connection
+limits (context compression + session resumption).
+
+### Safety
+- **Sensitive actions need your OK**: clicks on buy / pay / send / delete-like
+  buttons are refused until you confirm.
+- **No access to internal networks**: ARIA's browser can't reach localhost,
+  private IPs or the cloud metadata server (every request is checked).
+- **Optional access token**: set `ACCESS_TOKEN` on the server and enter it in
+  *Settings → Access token*.
+
 ### Interruption Handling
 At any point, saying "stop", "wait", or "actually..." — or pressing the interrupt button — immediately halts ARIA's current action chain and awaits new instructions.
 
@@ -244,6 +262,9 @@ streams it live; **Your screen** shows what you share with ARIA as context.
 | `GEMINI_AGENT_MODEL` | ADK agent model | `gemini-2.5-flash-lite` |
 | `GEMINI_VISION_MODEL` | Vision model | `gemini-2.5-flash-lite` |
 | `CORS_ORIGINS` | Allowed origins (comma-separated) | `*` |
+| `ACCESS_TOKEN` | Shared secret required by the API/WebSocket | _(open)_ |
+| `ALLOW_PRIVATE_NETWORK` | Let ARIA's browser open localhost/private IPs (dev only) | `false` |
+| `RECONNECT_GRACE_SECONDS` | How long a session waits for a reconnect | `120` |
 | `BROWSER_EXECUTABLE_PATH` | Use an existing Chromium binary | _(bundled)_ |
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID | required for Cloud |
 | `GOOGLE_CLOUD_REGION` | GCP region | `us-central1` |

@@ -1,7 +1,10 @@
 from urllib.parse import quote_plus
 
 from google.adk.agents import Agent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models import LlmRequest
 from google.adk.tools import FunctionTool, ToolContext
+from google.genai import types
 
 from agents.tools.browser_tools import browser_controller
 from agents.tools.system_tools import get_time_tool, notify_user_tool, summarize_history_tool
@@ -30,13 +33,16 @@ async def click_element(
     selector: str = "",
     x: int = -1,
     y: int = -1,
+    confirmed: bool = False,
 ) -> dict:
-    """Click a UI element. Provide either a CSS/Playwright `selector` OR viewport coordinates `x` and `y` (viewport is 1280x800)."""
+    """Click a UI element. Provide either a CSS/Playwright `selector` OR viewport coordinates `x` and `y` (viewport is 1280x800).
+    Set confirmed=true ONLY after the user explicitly approved a sensitive action (purchase, payment, sending, deleting)."""
     return await browser_controller.click(
         session_id_from(tool_context),
         selector=selector or None,
         x=x if x >= 0 else None,
         y=y if y >= 0 else None,
+        confirmed=confirmed,
     )
 
 
@@ -92,6 +98,27 @@ async def get_current_url(tool_context: ToolContext) -> dict:
     return await browser_controller.get_current_url(session_id_from(tool_context))
 
 
+# --- Context hygiene ---
+
+
+def keep_only_latest_image(callback_context: CallbackContext, llm_request: LlmRequest):
+    """Screenshots pile up in the session history: send only the most recent one
+    to the model, replacing older ones with a short placeholder."""
+    seen_latest = False
+    for content in reversed(llm_request.contents or []):
+        parts = content.parts or []
+        if not any(p.inline_data for p in parts):
+            continue
+        if not seen_latest:
+            seen_latest = True
+            continue
+        content.parts = [
+            types.Part(text="[earlier screenshot omitted]") if p.inline_data else p
+            for p in parts
+        ]
+    return None
+
+
 # --- ADK Agent definition ---
 
 ARIA_AGENT_INSTRUCTION = """You are ARIA -- an autonomous AI agent that controls a dedicated Chromium browser window.
@@ -120,6 +147,11 @@ of the USER's own screen as context -- you cannot click on it, only look at it.
 3. If a selector fails, try: text=ButtonLabel, role=button[name="..."], or coordinates from analyze_current_screen.
 4. When done, reply with a short status (1-2 sentences) in the user's language.
 5. Never navigate to harmful or illegal websites.
+6. SENSITIVE ACTIONS (buying, paying, booking, sending a message/email, deleting,
+   submitting personal data): STOP and ask the user to confirm, describing exactly
+   what will happen. If a tool returns status "needs_confirmation", do the same.
+   Only when the user's latest message explicitly approves, call again with confirmed=true.
+7. Private/internal addresses are blocked on purpose -- do not try to work around it.
 """
 
 aria_agent = Agent(
@@ -127,6 +159,7 @@ aria_agent = Agent(
     model=config.GEMINI_AGENT_MODEL,
     description="Adaptive Reality Intelligence Assistant -- voice + vision browser control agent",
     instruction=ARIA_AGENT_INSTRUCTION,
+    before_model_callback=keep_only_latest_image,
     tools=[
         FunctionTool(func=search_web),
         FunctionTool(func=get_current_url),

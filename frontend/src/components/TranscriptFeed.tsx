@@ -96,6 +96,7 @@ function SystemPill({ e }: { e: TranscriptEntry }) {
 export function TranscriptFeed() {
   const transcript = useARIAStore((s) => s.transcript)
   const connected  = useARIAStore((s) => s.connected)
+  const reconnecting = useARIAStore((s) => s.reconnecting)
   const bottomRef  = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -113,11 +114,11 @@ export function TranscriptFeed() {
           </span>
           <div className="flex items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full" style={{
-              background: connected ? 'var(--accent-green)' : 'var(--text-ghost)',
+              background: reconnecting ? 'var(--accent-amber, #f59e0b)' : connected ? 'var(--accent-green)' : 'var(--text-ghost)',
               boxShadow: connected ? '0 0 5px var(--accent-green)' : 'none',
             }} />
             <span className="font-mono" style={{ fontSize: 10, color: 'var(--text-ghost)' }}>
-              {transcript.length} entries
+              {reconnecting ? 'reconnecting…' : `${transcript.length} entries`}
             </span>
           </div>
         </div>

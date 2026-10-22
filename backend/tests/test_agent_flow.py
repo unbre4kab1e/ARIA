@@ -53,13 +53,16 @@ class FakeBrowser:
         pass
 
     async def frame_jpeg(self, session_id):
-        return b"\xff\xd8fake-jpeg"
+        return b"\xff\xd8fake-jpeg", "https://example.com/", "Example"
+
+    async def get_current_url(self, session_id):
+        return {"url": "https://example.com/", "title": "Example"}
 
 
 @pytest.fixture
 def env(monkeypatch):
     fake = FakeBrowser()
-    for name in ("navigate", "get_or_create_context", "close_context", "frame_jpeg"):
+    for name in ("navigate", "get_or_create_context", "close_context", "frame_jpeg", "get_current_url"):
         monkeypatch.setattr(browser_controller, name, getattr(fake, name))
 
     async def noop(*a, **k):
@@ -72,6 +75,7 @@ def env(monkeypatch):
         await asyncio.Event().wait()  # voice not under test: idle forever
 
     monkeypatch.setattr(gemini_live_service, "run_session", no_live)
+    monkeypatch.setattr(main, "check_gemini", noop)
 
     llm = ScriptedLlm()
     monkeypatch.setattr(aria_agent_module.aria_agent, "model", llm)
@@ -109,8 +113,10 @@ def test_text_command_runs_tool_with_session_id(env):
             # The tool received the real session id without the model passing it
             assert fake.calls == [(session_id, "example.com")]
 
-            frames = _recv_until(ws, lambda m: m["type"] == "browser_frame")
-            assert frames[-1]["data"]
+            # The preview is pushed as soon as the session connects
+            frames = [m for m in seen if m["type"] == "browser_frame"]
+            assert frames and frames[0]["data"]
+            assert frames[0]["url"] == "https://example.com/"
 
         history = client.get(f"/api/sessions/{session_id}/history").json()["history"]
         roles = [h["role"] for h in history]

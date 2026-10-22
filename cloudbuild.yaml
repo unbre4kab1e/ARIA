@@ -68,7 +68,7 @@ steps:
       - --max-instances=1
       - --session-affinity
       - --set-env-vars=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${_REGION},BROWSER_HEADLESS=true
-      - --set-secrets=GOOGLE_API_KEY=aria-google-api-key:latest
+      - --set-secrets=GOOGLE_API_KEY=aria-google-api-key:latest,ACCESS_TOKEN=aria-access-token:latest
     waitFor: [push-backend]
 
   # ── 5. Deploy frontend to Cloud Run ─────────────────────────────────────────

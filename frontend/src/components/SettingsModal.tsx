@@ -57,6 +57,26 @@ export function SettingsModal() {
           />
         </div>
 
+        {/* Access token */}
+        <div className="space-y-1.5">
+          <label className="font-mono uppercase tracking-widest"
+            style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+            Access token
+          </label>
+          <input type="password" value={settings.accessToken} placeholder="(only if the server sets ACCESS_TOKEN)"
+            autoComplete="off"
+            onChange={(e) => setSettings({ accessToken: e.target.value })}
+            className="w-full px-3 py-2.5 rounded-lg font-mono text-sm outline-none"
+            style={{
+              background: 'var(--bg-input)',
+              border: '1px solid var(--border)',
+              color: 'var(--text-primary)',
+            }}
+            onFocus={(e)  => e.target.style.borderColor = 'var(--border-focus)'}
+            onBlur={(e)   => e.target.style.borderColor = 'var(--border)'}
+          />
+        </div>
+
         {/* Mic sensitivity */}
         <div className="space-y-1.5">
           <div className="flex justify-between">

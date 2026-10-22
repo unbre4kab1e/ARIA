@@ -12,11 +12,21 @@ export const wsBaseUrl = () => {
 
 const BASE_URL = apiBaseUrl
 
+export const accessToken = () => useARIAStore.getState().settings.accessToken.trim()
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = accessToken()
   const res = await fetch(`${BASE_URL()}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { 'X-ARIA-Token': token } : {}),
+      ...options?.headers,
+    },
   })
+  if (res.status === 401) {
+    throw new Error('Access token missing or wrong — set it in Settings')
+  }
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`API ${path} (${res.status}): ${err}`)
@@ -54,5 +64,13 @@ export const api = {
     }),
 
   health: () =>
-    request<{ status: string; active_sessions: number; gemini_configured: boolean; browser_ready: boolean; browser_error: string | null }>('/api/health'),
+    request<{
+      status: string
+      active_sessions: number
+      auth_required: boolean
+      gemini_configured: boolean
+      gemini_status: string
+      browser_ready: boolean
+      browser_error: string | null
+    }>('/api/health'),
 }

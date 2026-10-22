@@ -1,14 +1,31 @@
 import asyncio
 import logging
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Route
 
 from config import config
+from services.url_guard import check_url
 
 logger = logging.getLogger("aria.browser")
 
 VIEWPORT = {"width": 1280, "height": 800}
+
+# Clicking something labelled like this needs the user's explicit go-ahead
+SENSITIVE_ACTION = re.compile(
+    r"\b(buy|pay|purchase|checkout|check out|place order|order now|confirm (order|purchase|payment)|"
+    r"subscribe|send|delete|remove account|transfer|donate|book now|"
+    r"acheter|achat|payer|paiement|commander|valider (la|ma) commande|s'abonner|abonnez|"
+    r"envoyer|supprimer|virement|faire un don|r[ée]server)\b",
+    re.IGNORECASE,
+)
+
+_ELEMENT_LABEL_JS = """el => {
+  const t = el.closest('button, a, input, [role=button], [role=link]') || el;
+  return (t.innerText || t.value || t.getAttribute('aria-label') || t.title || '').slice(0, 200);
+}"""
 
 
 class BrowserController:
@@ -69,7 +86,7 @@ class BrowserController:
         if not self.ready:
             raise RuntimeError(f"Browser unavailable: {self.last_error}")
         if session_id not in self._contexts:
-            self._contexts[session_id] = await self._browser.new_context(
+            ctx = await self._browser.new_context(
                 viewport=VIEWPORT,
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -77,7 +94,21 @@ class BrowserController:
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
             )
+            # Every request (navigation, redirect, subresource) goes through the guard
+            await ctx.route("**/*", self._guard_request)
+            self._contexts[session_id] = ctx
         return self._contexts[session_id]
+
+    @staticmethod
+    async def _guard_request(route: Route):
+        url = route.request.url
+        if urlsplit(url).scheme in ("http", "https"):
+            reason = await check_url(url)
+            if reason:
+                logger.warning(f"Blocked request to {url}: {reason}")
+                await route.abort("blockedbyclient")
+                return
+        await route.continue_()
 
     async def close_context(self, session_id: str):
         ctx = self._contexts.pop(session_id, None)
@@ -100,8 +131,11 @@ class BrowserController:
 
     async def navigate(self, session_id: str, url: str) -> dict[str, Any]:
         """Navigate the browser to a URL."""
-        if not url.startswith(("http://", "https://")):
+        if "://" not in url:
             url = f"https://{url}"
+        reason = await check_url(url)
+        if reason:
+            return {"status": "error", "error": f"Navigation blocked: {reason}"}
         try:
             page = await self._get_page(session_id)
             await page.goto(url, wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
@@ -119,10 +153,21 @@ class BrowserController:
         selector: str | None = None,
         x: int | None = None,
         y: int | None = None,
+        confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Click an element by CSS selector or by (x, y) coordinates."""
+        """Click an element by CSS selector or by (x, y) coordinates.
+        Clicks on purchase/payment/send/delete-like elements need confirmed=True."""
         try:
             page = await self._get_page(session_id)
+            if not confirmed:
+                label = await self._element_label(page, selector, x, y)
+                if SENSITIVE_ACTION.search(f"{selector or ''} {label}"):
+                    return {
+                        "status": "needs_confirmation",
+                        "element": label.strip() or selector,
+                        "message": "This looks like a sensitive action. Ask the user to confirm, "
+                                   "then call again with confirmed=true.",
+                    }
             if selector:
                 await page.click(selector, timeout=config.BROWSER_TIMEOUT_MS)
                 return {"status": "ok", "action": "click", "target": selector}
@@ -132,6 +177,22 @@ class BrowserController:
             return {"status": "error", "error": "Provide either selector or (x, y) coordinates."}
         except Exception as e:
             return {"status": "error", "error": f"Click failed: {e}"}
+
+    @staticmethod
+    async def _element_label(page: Page, selector: str | None, x: int | None, y: int | None) -> str:
+        """Visible label of the element about to be clicked ('' if unknown)."""
+        try:
+            if selector:
+                return await page.locator(selector).first.evaluate(_ELEMENT_LABEL_JS, timeout=2000)
+            if x is not None and y is not None:
+                return await page.evaluate(
+                    f"([x, y]) => {{ const el = document.elementFromPoint(x, y); "
+                    f"return el ? ({_ELEMENT_LABEL_JS})(el) : ''; }}",
+                    [x, y],
+                )
+        except Exception:
+            pass
+        return ""
 
     # ─── Tool: type_text ──────────────────────────────────────────────────────
 
@@ -178,13 +239,15 @@ class BrowserController:
         page = await self._get_page(session_id)
         return await page.screenshot(type="png", full_page=False)
 
-    async def frame_jpeg(self, session_id: str) -> bytes | None:
-        """Compact JPEG frame for the live preview; None if nothing to show."""
+    async def frame_jpeg(self, session_id: str) -> tuple[bytes, str, str] | None:
+        """(JPEG, url, title) of the current page for the live preview; None if nothing to show."""
         ctx = self._contexts.get(session_id)
         if not ctx or not ctx.pages:
             return None
+        page = ctx.pages[-1]
         try:
-            return await ctx.pages[-1].screenshot(type="jpeg", quality=60, full_page=False)
+            frame = await page.screenshot(type="jpeg", quality=60, full_page=False)
+            return frame, page.url, await page.title()
         except Exception:
             return None
 

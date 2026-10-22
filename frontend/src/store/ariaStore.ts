@@ -17,6 +17,7 @@ export interface ToastItem {
 
 export interface ARIASettings {
   apiUrl: string
+  accessToken: string
   micSensitivity: number
   screenshotIntervalMs: number
   voiceEnabled: boolean
@@ -27,6 +28,7 @@ interface ARIAStore {
   // Session
   sessionId: string | null
   connected: boolean
+  reconnecting: boolean
   ariaState: ARIAState
   actionCount: number
   sessionStartTime: number | null
@@ -35,6 +37,7 @@ interface ARIAStore {
   // Screen
   lastScreenshot: string | null
   browserFrame: string | null
+  browserPage: { url: string; title: string } | null
   screenShareActive: boolean
   lastClickPos: { x: number; y: number } | null
   // Mic
@@ -50,11 +53,12 @@ interface ARIAStore {
   // Actions
   setSessionId: (id: string | null) => void
   setConnected: (v: boolean) => void
+  setReconnecting: (v: boolean) => void
   setARIAState: (s: ARIAState) => void
   addTranscript: (entry: Omit<TranscriptEntry, 'id'>) => void
   updateLastARIA: (content: string, final: boolean) => void
   setLastScreenshot: (b64: string | null) => void
-  setBrowserFrame: (b64: string | null) => void
+  setBrowserFrame: (b64: string | null, page?: { url: string; title: string }) => void
   setScreenShareActive: (v: boolean) => void
   setLastClickPos: (pos: { x: number; y: number } | null) => void
   setMicActive: (v: boolean) => void
@@ -83,17 +87,20 @@ let _toastId = 0
 export const useARIAStore = create<ARIAStore>((set, get) => ({
   sessionId: null,
   connected: false,
+  reconnecting: false,
   ariaState: 'idle',
   actionCount: 0,
   sessionStartTime: null,
   transcript: [],
   lastScreenshot: null,
   browserFrame: null,
+  browserPage: null,
   screenShareActive: false,
   lastClickPos: null,
   micActive: false,
   settings: {
     apiUrl: '',
+    accessToken: '',
     micSensitivity: 0.5,
     screenshotIntervalMs: 2000,
     voiceEnabled: true,
@@ -106,6 +113,7 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
 
   setSessionId: (id) => set({ sessionId: id, sessionStartTime: id ? Date.now() : null }),
   setConnected: (v) => set({ connected: v }),
+  setReconnecting: (v) => set({ reconnecting: v }),
   setARIAState: (s) => set({ ariaState: s }),
 
   addTranscript: (entry) =>
@@ -135,7 +143,7 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
     }),
 
   setLastScreenshot: (b64) => set({ lastScreenshot: b64 }),
-  setBrowserFrame: (b64) => set({ browserFrame: b64 }),
+  setBrowserFrame: (b64, page) => set((s) => ({ browserFrame: b64, browserPage: page ?? s.browserPage })),
   setScreenShareActive: (v) => set({ screenShareActive: v }),
   setLastClickPos: (pos) => set({ lastClickPos: pos }),
   setMicActive: (v) => set({ micActive: v }),
@@ -167,12 +175,14 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
     set({
       sessionId: null,
       connected: false,
+      reconnecting: false,
       ariaState: 'idle',
       actionCount: 0,
       sessionStartTime: null,
       transcript: [],
       lastScreenshot: null,
       browserFrame: null,
+      browserPage: null,
       screenShareActive: false,
       lastClickPos: null,
       micActive: false,
