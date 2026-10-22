@@ -37,8 +37,9 @@ export function ControlBar() {
 
   const toggleMic = useCallback(async () => {
     if (micActive) { mic.stop(); setMicActive(false) }
-    else { await mic.start(); setMicActive(true) }
-  }, [micActive, mic, setMicActive])
+    else if (await mic.start()) setMicActive(true)
+    else pushToast('Microphone permission denied', 'warning')
+  }, [micActive, mic, setMicActive, pushToast])
 
   const toggleScreen = useCallback(async () => {
     if (screenShareActive) { screen.stop(); setScreenShareActive(false) }
@@ -48,6 +49,14 @@ export function ControlBar() {
       else pushToast('Screen share permission denied', 'warning')
     }
   }, [screenShareActive, screen, setScreenShareActive, pushToast])
+
+  // Stop capture devices when the session ends
+  useEffect(() => {
+    if (!connected) {
+      mic.stop(); setMicActive(false)
+      screen.stop(); setScreenShareActive(false)
+    }
+  }, [connected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSend = () => {
     if (!text.trim() || !connected) return

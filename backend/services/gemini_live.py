@@ -69,11 +69,9 @@ class GeminiLiveService:
             async def _send_audio():
                 """Forward raw audio to Gemini Live — it handles VAD, transcription, and response."""
                 async for chunk in audio_input_stream:
-                    if aria_session.interrupted:
-                        continue
                     try:
                         await session.send_realtime_input(
-                            media=types.Blob(
+                            audio=types.Blob(
                                 mime_type="audio/pcm;rate=16000",
                                 data=chunk,
                             )
@@ -85,47 +83,76 @@ class GeminiLiveService:
             async def _receive():
                 # Buffer to accumulate input transcription fragments
                 input_buf: list[str] = []
+                # Buffer for ARIA's own spoken transcript (sent cumulatively)
+                output_buf: list[str] = []
 
-                async for response in session.receive():
-                    if not hasattr(response, "server_content") or not response.server_content:
-                        continue
+                async def _flush_user_speech():
+                    full_text = "".join(input_buf).strip()
+                    input_buf.clear()
+                    if full_text:
+                        logger.info(f"User said (complete): {full_text!r}")
+                        # Notify for ADK routing only — Gemini Live already responds via audio
+                        if on_user_speech:
+                            await on_user_speech(full_text)
 
-                    sc = response.server_content
+                # receive() ends after each turn_complete: loop to keep the
+                # conversation going for the whole session.
+                while True:
+                    got_any = False
+                    async for response in session.receive():
+                        got_any = True
+                        if not hasattr(response, "server_content") or not response.server_content:
+                            continue
 
-                    if sc.interrupted:
-                        aria_session.interrupt()
-                        input_buf.clear()
-                        if on_state_change:
-                            await on_state_change(SessionState.INTERRUPTED)
-                        continue
+                        sc = response.server_content
 
-                    # Audio response from ARIA
-                    if hasattr(sc, "model_turn") and sc.model_turn:
-                        for part in (sc.model_turn.parts or []):
-                            if hasattr(part, "inline_data") and part.inline_data and on_audio:
-                                await on_audio(part.inline_data.data)
+                        if sc.interrupted:
+                            # User barged in while ARIA was speaking: tell the client to
+                            # drop queued audio. Keep the user's transcription buffer —
+                            # it holds what they are saying right now.
+                            if output_buf and on_text:
+                                await on_text("".join(output_buf).strip(), final=True)
+                            output_buf.clear()
+                            if on_state_change:
+                                await on_state_change(SessionState.INTERRUPTED)
+                            continue
 
-                    # What ARIA said (text transcript of audio response)
-                    if hasattr(sc, "output_transcription") and sc.output_transcription:
-                        t = sc.output_transcription
-                        if hasattr(t, "text") and t.text and on_text:
-                            await on_text(t.text)
+                        # ARIA starts answering => the user has finished speaking
+                        if input_buf and (sc.model_turn or sc.output_transcription):
+                            await _flush_user_speech()
 
-                    # What user said — accumulate fragments
-                    if hasattr(sc, "input_transcription") and sc.input_transcription:
-                        t = sc.input_transcription
-                        if hasattr(t, "text") and t.text:
-                            input_buf.append(t.text)
+                        # Audio response from ARIA
+                        if hasattr(sc, "model_turn") and sc.model_turn:
+                            for part in (sc.model_turn.parts or []):
+                                if hasattr(part, "inline_data") and part.inline_data and on_audio:
+                                    await on_audio(part.inline_data.data)
 
-                    # Turn complete = user finished speaking
-                    if getattr(sc, "turn_complete", False) and input_buf:
-                        full_text = "".join(input_buf).strip()
-                        input_buf.clear()
-                        if full_text:
-                            logger.info(f"User said (complete): {full_text!r}")
-                            # Notify for ADK routing only — Gemini Live already responds via audio
-                            if on_user_speech:
-                                await on_user_speech(full_text)
+                        # What ARIA said (text transcript of audio response)
+                        if hasattr(sc, "output_transcription") and sc.output_transcription:
+                            t = sc.output_transcription
+                            if hasattr(t, "text") and t.text:
+                                output_buf.append(t.text)
+                                if on_text:
+                                    await on_text("".join(output_buf), final=False)
+
+                        # What user said — accumulate fragments
+                        if hasattr(sc, "input_transcription") and sc.input_transcription:
+                            t = sc.input_transcription
+                            if hasattr(t, "text") and t.text:
+                                input_buf.append(t.text)
+
+                        if getattr(sc, "turn_complete", False) and output_buf:
+                            if on_text:
+                                await on_text("".join(output_buf).strip(), final=True)
+                            output_buf.clear()
+
+                        # Turn complete = user finished speaking
+                        if getattr(sc, "turn_complete", False) and input_buf:
+                            await _flush_user_speech()
+
+                    if not got_any:
+                        logger.info("Gemini Live stream closed.")
+                        return
 
             await asyncio.gather(
                 _send_audio(),

@@ -1,4 +1,16 @@
-const BASE_URL = () => localStorage.getItem('aria_api_url') || 'http://127.0.0.1:8888'
+import { useARIAStore } from '../store/ariaStore'
+
+/** Backend base URL. Empty = same origin (Vite dev proxy / nginx in Docker). */
+export const apiBaseUrl = () => useARIAStore.getState().settings.apiUrl.trim().replace(/\/+$/, '')
+
+/** WebSocket base URL derived from the API URL (or from the page origin). */
+export const wsBaseUrl = () => {
+  const base = apiBaseUrl()
+  if (base) return base.replace(/^http/, 'ws')
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
+}
+
+const BASE_URL = apiBaseUrl
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL()}${path}`, {
@@ -42,5 +54,5 @@ export const api = {
     }),
 
   health: () =>
-    request<{ status: string; active_sessions: number }>('/api/health'),
+    request<{ status: string; active_sessions: number; gemini_configured: boolean; browser_ready: boolean; browser_error: string | null }>('/api/health'),
 }

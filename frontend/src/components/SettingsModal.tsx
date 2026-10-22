@@ -44,7 +44,7 @@ export function SettingsModal() {
             style={{ fontSize: 10, color: 'var(--text-muted)' }}>
             Backend URL
           </label>
-          <input type="text" value={settings.apiUrl}
+          <input type="text" value={settings.apiUrl} placeholder="(same origin)"
             onChange={(e) => setSettings({ apiUrl: e.target.value })}
             className="w-full px-3 py-2.5 rounded-lg font-mono text-sm outline-none"
             style={{

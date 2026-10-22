@@ -1,6 +1,6 @@
 export type WSMessageType =
   | 'audio' | 'screenshot' | 'text' | 'interrupt' | 'ping'
-  | 'state' | 'action' | 'notification' | 'error' | 'pong'
+  | 'state' | 'action' | 'notification' | 'error' | 'pong' | 'browser_frame'
 
 export type ARIAState = 'idle' | 'listening' | 'thinking' | 'acting' | 'interrupted'
 
@@ -15,6 +15,8 @@ export interface WSMessage {
   message?: string
   level?: 'info' | 'success' | 'warning' | 'error'
   role?: 'user' | 'aria'
+  x?: number
+  y?: number
 }
 
 type MessageHandler = (msg: WSMessage) => void
@@ -29,7 +31,7 @@ export class ARIAWebSocket {
 
   constructor(
     private readonly sessionId: string,
-    private readonly baseUrl = 'ws://127.0.0.1:8888'
+    private readonly baseUrl: string
   ) {}
 
   connect(): Promise<void> {

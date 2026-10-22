@@ -1,69 +1,80 @@
 from urllib.parse import quote_plus
 
 from google.adk.agents import Agent
-from google.adk.tools import FunctionTool
+from google.adk.tools import FunctionTool, ToolContext
 
 from agents.tools.browser_tools import browser_controller
 from agents.tools.system_tools import get_time_tool, notify_user_tool, summarize_history_tool
 from agents.tools.vision_tools import analyze_screen_tool, describe_element_tool
 from config import config
 
+# Key under which the ARIA session id is stored in the ADK session state.
+# Tools read it from `tool_context.state` — the model never has to pass it.
+SESSION_STATE_KEY = "aria_session_id"
+
+
+def session_id_from(tool_context: ToolContext) -> str:
+    return tool_context.state.get(SESSION_STATE_KEY, "")
+
+
 # --- Browser action tools (wrapped as ADK FunctionTools) ---
 
 
-async def navigate_to(url: str, session_id: str = "") -> dict:
-    """Navigate the controlled browser to the given URL.
-    The session_id is extracted from the conversation context [session_id=...] line."""
-    if not url.startswith(('http://', 'https://')):
-        url = f"https://{url}"
-    return await browser_controller.navigate(session_id, url)
+async def navigate_to(url: str, tool_context: ToolContext) -> dict:
+    """Navigate the controlled browser to the given URL."""
+    return await browser_controller.navigate(session_id_from(tool_context), url)
 
 
 async def click_element(
-    selector: str | None = None,
-    x: int | None = None,
-    y: int | None = None,
-    session_id: str = "",
+    tool_context: ToolContext,
+    selector: str = "",
+    x: int = -1,
+    y: int = -1,
 ) -> dict:
-    """Click a UI element. Provide either a CSS `selector` OR screen coordinates `x` and `y`."""
-    return await browser_controller.click(session_id, selector=selector, x=x, y=y)
+    """Click a UI element. Provide either a CSS/Playwright `selector` OR viewport coordinates `x` and `y` (viewport is 1280x800)."""
+    return await browser_controller.click(
+        session_id_from(tool_context),
+        selector=selector or None,
+        x=x if x >= 0 else None,
+        y=y if y >= 0 else None,
+    )
 
 
 async def type_into_field(
     selector: str,
     text: str,
+    tool_context: ToolContext,
     clear_first: bool = True,
-    session_id: str = "",
 ) -> dict:
-    """Type text into an input field identified by CSS selector."""
-    return await browser_controller.type_text(session_id, selector, text, clear_first)
+    """Type text into an input field identified by CSS/Playwright selector."""
+    return await browser_controller.type_text(session_id_from(tool_context), selector, text, clear_first)
 
 
 async def scroll_page(
+    tool_context: ToolContext,
     direction: str = "down",
     amount: int = 500,
-    session_id: str = "",
 ) -> dict:
     """Scroll the browser page up or down by `amount` pixels."""
-    return await browser_controller.scroll(session_id, direction, amount)
+    return await browser_controller.scroll(session_id_from(tool_context), direction, amount)
 
 
-async def press_keyboard_key(key: str, session_id: str = "") -> dict:
+async def press_keyboard_key(key: str, tool_context: ToolContext) -> dict:
     """Press a keyboard key, e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown'."""
-    return await browser_controller.press_key(session_id, key)
+    return await browser_controller.press_key(session_id_from(tool_context), key)
 
 
-async def read_page_content(session_id: str = "") -> dict:
+async def read_page_content(tool_context: ToolContext) -> dict:
     """Extract the visible text content from the current browser page."""
-    return await browser_controller.get_page_text(session_id)
+    return await browser_controller.get_page_text(session_id_from(tool_context))
 
 
-async def wait_for_element(selector: str, timeout_ms: int = 5000, session_id: str = "") -> dict:
+async def wait_for_element(selector: str, tool_context: ToolContext, timeout_ms: int = 5000) -> dict:
     """Wait until a CSS selector becomes visible on the page."""
-    return await browser_controller.wait_for_selector(session_id, selector, timeout_ms)
+    return await browser_controller.wait_for_selector(session_id_from(tool_context), selector, timeout_ms)
 
 
-async def search_web(query: str, engine: str = "google", session_id: str = "") -> dict:
+async def search_web(query: str, tool_context: ToolContext, engine: str = "google") -> dict:
     """Search the web for a query. This is the FASTEST way to search.
     engine: 'google' (default) | 'bing' | 'duckduckgo'"""
     encoded = quote_plus(query)
@@ -73,12 +84,12 @@ async def search_web(query: str, engine: str = "google", session_id: str = "") -
         "duckduckgo": f"https://duckduckgo.com/?q={encoded}",
     }
     url = urls.get(engine, urls["google"])
-    return await browser_controller.navigate(session_id, url)
+    return await browser_controller.navigate(session_id_from(tool_context), url)
 
 
-async def get_current_url(session_id: str = "") -> dict:
+async def get_current_url(tool_context: ToolContext) -> dict:
     """Get the current URL and page title of the browser."""
-    return await browser_controller.get_current_url(session_id)
+    return await browser_controller.get_current_url(session_id_from(tool_context))
 
 
 # --- ADK Agent definition ---
@@ -87,31 +98,28 @@ ARIA_AGENT_INSTRUCTION = """You are ARIA -- an autonomous AI agent that controls
 
 IMPORTANT: You control YOUR OWN browser (Chromium), NOT the user's browser.
 When the user says "search for X" or "go to Y", you must navigate YOUR browser there.
-
-IMPORTANT: The session_id is provided in the user message as [session_id=...].
-You MUST pass this session_id to ALL browser tool calls.
+The user sees a live preview of your browser. A message may also include a screenshot
+of the USER's own screen as context -- you cannot click on it, only look at it.
 
 ## Task shortcuts -- DO THESE DIRECTLY:
-- "search for X" -> use search_web(query="X", session_id="<from context>")
-- "go to / open / navigate to [site]" -> navigate_to(url="https://site.com", session_id="<from context>")
-- "click [text]" -> click_element(selector="text=Click text here", session_id="<from context>")
-- "type X" -> type_into_field(selector=<known selector>, text="X", session_id="<from context>")
-- "scroll down" -> scroll_page(direction="down", session_id="<from context>")
-- "press Enter" -> press_keyboard_key(key="Enter", session_id="<from context>")
+- "search for X" -> search_web(query="X")
+- "go to / open / navigate to [site]" -> navigate_to(url="https://site.com")
+- "click [text]" -> click_element(selector="text=Click text here")
+- "type X" -> type_into_field(selector=<known selector>, text="X")
+- "scroll down" -> scroll_page(direction="down")
+- "press Enter" -> press_keyboard_key(key="Enter")
 
 ## Common selectors:
 - Google search bar: textarea[name="q"]
-- Google search button: input[name="btnK"]
-- YouTube search: input#search
+- YouTube search: input[name="search_query"]
 - Generic search inputs: input[type="search"], input[type="text"], textarea
 
 ## Rules:
 1. For search tasks: ALWAYS use search_web() first -- it's one step.
 2. Only call analyze_current_screen when you genuinely don't know what's on the page.
-3. If a selector fails, try: text=ButtonLabel, role=button name=..., or coordinates.
-4. After every action, give a short spoken status update.
+3. If a selector fails, try: text=ButtonLabel, role=button[name="..."], or coordinates from analyze_current_screen.
+4. When done, reply with a short status (1-2 sentences) in the user's language.
 5. Never navigate to harmful or illegal websites.
-6. ALWAYS extract the session_id from the [session_id=...] line in the user message.
 """
 
 aria_agent = Agent(

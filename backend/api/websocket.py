@@ -8,10 +8,13 @@ Architecture:
   - ADK agent executes browser tools and sends action updates (no duplicate text)
   - Text typed in chat always goes to ADK agent and gets a text response
   - Screenshots are stored as context for the ADK agent
+  - Frames of ARIA's own (headless) browser are streamed back as "browser_frame"
+  - "interrupt" cancels the running agent turn
 """
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -20,6 +23,7 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from agents.runner import ARIAAgentRunner
+from agents.tools.browser_tools import browser_controller
 from services.gemini_live import gemini_live_service
 from services.session import ARIASession, SessionState, session_manager
 
@@ -52,11 +56,13 @@ class ARIAWebSocketHandler:
         self.runner = ARIAAgentRunner(session)
 
         self._last_screenshot_b64: str | None = None
-        self._text_queue: asyncio.Queue[tuple[str, bool]] = asyncio.Queue(maxsize=20)
+        self._text_queue: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()
         # tuple: (message, from_voice) — from_voice=True means don't send text response
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=100)
         self._mic_active = False
         self._audio_chunk_count = 0
+        self._current_turn: asyncio.Task | None = None
+        self._last_frame_hash: str | None = None
 
     # --- Send helpers ---
 
@@ -75,8 +81,55 @@ class ARIAWebSocketHandler:
     async def _on_state_change(self, state: SessionState):
         await self.send({"type": "state", "state": state.value})
 
-    async def _on_action(self, action: str, detail: str):
-        await self.send({"type": "action", "action": action, "detail": detail})
+    async def _on_action(self, action: str, detail: str, args: dict | None = None):
+        payload: dict[str, Any] = {"type": "action", "action": action, "detail": detail}
+        args = args or {}
+        x, y = args.get("x"), args.get("y")
+        if action == "click_element" and isinstance(x, (int, float)) and isinstance(y, (int, float)) and x >= 0 and y >= 0:
+            payload["x"], payload["y"] = x, y
+        await self.send(payload)
+        if action == "notify_user" and args.get("message"):
+            await self.send({
+                "type": "notification",
+                "message": args["message"],
+                "level": args.get("level", "info"),
+            })
+
+    async def _push_browser_frame(self):
+        frame = await browser_controller.frame_jpeg(self.session.session_id)
+        if not frame:
+            return
+        digest = hashlib.md5(frame).hexdigest()
+        if digest == self._last_frame_hash:
+            return
+        self._last_frame_hash = digest
+        await self.send({"type": "browser_frame", "data": base64.b64encode(frame).decode()})
+
+    async def _frame_loop(self):
+        """Stream ARIA's browser to the client: fast while working, slow when idle."""
+        while True:
+            busy = self._current_turn is not None and not self._current_turn.done()
+            await asyncio.sleep(0.8 if busy else 4.0)
+            try:
+                await self._push_browser_frame()
+            except Exception as e:
+                logger.debug(f"Frame push failed: {e}")
+
+    async def interrupt(self):
+        turn = self._current_turn
+        if turn and not turn.done():
+            turn.cancel()
+        # Drop queued commands that were waiting behind the interrupted one
+        while not self._text_queue.empty():
+            item = self._text_queue.get_nowait()
+            if item[0] == "":  # keep the shutdown sentinel
+                await self._text_queue.put(item)
+                break
+        self.session.interrupt()
+        await self.send({"type": "notification", "message": "Interrupted.", "level": "info"})
+        await self._on_state_change(SessionState.INTERRUPTED)
+        self.session.resume()
+        await self._on_state_change(SessionState.LISTENING)
 
     async def _on_user_speech(self, text: str):
         """Called when Gemini Live transcribes user speech.
@@ -92,8 +145,7 @@ class ARIAWebSocketHandler:
         # Only route to ADK agent for action commands
         if _is_action_command(text):
             logger.info(f"Action command detected: {text!r}")
-            if not self._text_queue.full():
-                await self._text_queue.put((text, True))  # from_voice=True
+            await self._text_queue.put((text, True))  # from_voice=True
         else:
             logger.info(f"Conversation (handled by Gemini Live voice): {text!r}")
 
@@ -129,9 +181,7 @@ class ARIAWebSocketHandler:
                             await self._text_queue.put((content, False))  # from_voice=False
 
                     case "interrupt":
-                        self.session.interrupt()
-                        await self.send({"type": "notification", "message": "Interrupted.", "level": "info"})
-                        await self._on_state_change(SessionState.INTERRUPTED)
+                        await self.interrupt()
 
                     case "ping":
                         await self.send({"type": "pong"})
@@ -151,37 +201,33 @@ class ARIAWebSocketHandler:
             content, from_voice = await self._text_queue.get()
             if content == "":
                 break
-            if self.session.interrupted:
-                self.session.resume()
-                continue
 
+            # Voice command: Gemini Live already answers out loud, so only actions
+            # are shown. Typed text: also send the agent's text response.
+            on_text = None if from_voice else (lambda t: self._on_text(t, final=True))
+            self._current_turn = asyncio.create_task(
+                self.runner.run_turn(
+                    user_message=content,
+                    screenshot_b64=self._last_screenshot_b64,
+                    on_text=on_text,
+                    on_action=self._on_action,
+                    on_state_change=self._on_state_change,
+                )
+            )
             try:
-                await self._on_state_change(SessionState.THINKING)
-
-                if from_voice:
-                    # Voice command: only send actions, no text response (Gemini Live handles voice)
-                    await self.runner.run_turn(
-                        user_message=content,
-                        screenshot_b64=self._last_screenshot_b64,
-                        on_text=None,  # no text output — voice already responded
-                        on_action=self._on_action,
-                        on_state_change=self._on_state_change,
-                    )
-                else:
-                    # Typed text: send full text response
-                    await self.runner.run_turn(
-                        user_message=content,
-                        screenshot_b64=self._last_screenshot_b64,
-                        on_text=lambda t: self._on_text(t, final=True),
-                        on_action=self._on_action,
-                        on_state_change=self._on_state_change,
-                    )
-
-                await self._on_state_change(SessionState.LISTENING)
+                await self._current_turn
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current and current.cancelling():
+                    raise  # the handler itself is shutting down
+                logger.info("Agent turn interrupted.")
             except Exception as e:
                 logger.error(f"ADK turn error: {e}", exc_info=True)
                 await self.send({"type": "error", "message": f"Agent error: {e}"})
                 await self._on_state_change(SessionState.LISTENING)
+            finally:
+                self._current_turn = None
+                await self._push_browser_frame()
 
     # --- Audio generator for Gemini Live ---
 
@@ -201,14 +247,17 @@ class ARIAWebSocketHandler:
         receive_task = asyncio.create_task(self._receive_loop())
         text_proc_task = asyncio.create_task(self._text_processor_loop())
         live_task = asyncio.create_task(self._run_live_session())
+        frame_task = asyncio.create_task(self._frame_loop())
 
         try:
             await receive_task
         except Exception as e:
             logger.error(f"Handler error: {e}")
         finally:
-            text_proc_task.cancel()
-            live_task.cancel()
+            for task in (text_proc_task, live_task, frame_task):
+                task.cancel()
+            if self._current_turn:
+                self._current_turn.cancel()
             await self.runner.stop()
 
     async def _run_live_session(self):

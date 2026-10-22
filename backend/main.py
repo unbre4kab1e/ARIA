@@ -28,8 +28,9 @@ logger = logging.getLogger("aria")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting ARIA backend...")
+    if not config.GOOGLE_API_KEY:
+        logger.warning("GOOGLE_API_KEY is not set — Gemini calls will fail. See backend/.env.example.")
     await browser_controller.start()
-    logger.info("Playwright browser started.")
     yield
     logger.info("Shutting down ARIA backend...")
     await browser_controller.stop()
@@ -45,8 +46,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
-    allow_credentials=True,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

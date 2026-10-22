@@ -142,8 +142,15 @@ cp .env.example .env
 
 # Run
 python main.py
-# → http://localhost:8000
+# → http://localhost:8000  (health check: /api/health)
+
+# Tests (no API key or network needed)
+pip install -r requirements-dev.txt
+pytest
 ```
+
+> If Playwright cannot download Chromium on your machine, point
+> `BROWSER_EXECUTABLE_PATH` at an existing Chromium/Chrome binary.
 
 ### 2. Frontend
 
@@ -152,8 +159,11 @@ cd frontend
 
 npm install
 npm run dev
-# → http://localhost:5173
+# → http://localhost:5173  (proxies /api and /ws to the backend on :8000)
 ```
+
+The frontend talks to the backend on the same origin by default. To use a
+backend elsewhere, set **Settings → Backend URL** (e.g. `http://localhost:8000`).
 
 ### 3. Docker (full stack)
 
@@ -184,10 +194,14 @@ echo -n "YOUR_GEMINI_API_KEY" | \
 ### 3. Deploy via Cloud Build
 
 ```bash
-gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
+gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID \
+  --substitutions=SHORT_SHA=$(git rev-parse --short HEAD)
 ```
 
 This builds both Docker images, pushes to Artifact Registry, and deploys to Cloud Run.
+The frontend's nginx proxies `/api` and `/ws` to the backend URL (`BACKEND_URL`),
+which the pipeline resolves automatically. Sessions are kept in memory, so the
+backend runs as a single instance.
 
 ---
 
@@ -215,6 +229,10 @@ ARIA can chain complex workflows:
 ### Screen-aware Q&A
 Point at anything on screen and ask "what does this button do?" — ARIA uses Gemini Vision to describe it.
 
+### Live view of ARIA's browser
+ARIA drives its own (headless) Chromium. The **Screen Feed → ARIA browser** panel
+streams it live; **Your screen** shows what you share with ARIA as context.
+
 ---
 
 ## Environment Variables
@@ -222,6 +240,11 @@ Point at anything on screen and ask "what does this button do?" — ARIA uses Ge
 | Variable | Description | Default |
 |---|---|---|
 | `GOOGLE_API_KEY` | Gemini API key | required |
+| `GEMINI_LIVE_MODEL` | Live (voice) model | `gemini-2.5-flash-native-audio-preview-12-2025` |
+| `GEMINI_AGENT_MODEL` | ADK agent model | `gemini-2.5-flash-lite` |
+| `GEMINI_VISION_MODEL` | Vision model | `gemini-2.5-flash-lite` |
+| `CORS_ORIGINS` | Allowed origins (comma-separated) | `*` |
+| `BROWSER_EXECUTABLE_PATH` | Use an existing Chromium binary | _(bundled)_ |
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID | required for Cloud |
 | `GOOGLE_CLOUD_REGION` | GCP region | `us-central1` |
 | `PORT` | Backend port | `8000` |

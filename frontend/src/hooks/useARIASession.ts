@@ -1,5 +1,5 @@
 import { useCallback, useRef } from 'react'
-import { api } from '../lib/api'
+import { api, wsBaseUrl } from '../lib/api'
 import { ARIAWebSocket } from '../lib/websocket'
 import { useARIAStore } from '../store/ariaStore'
 import { useAudioOutput } from './useAudioOutput'
@@ -9,13 +9,16 @@ export function useARIASession() {
   const audioOutput = useAudioOutput()
 
   const connect = useCallback(async () => {
-    const { setSessionId, setConnected, setARIAState, addTranscript, updateLastARIA, incrementActionCount, pushToast, settings } = useARIAStore.getState()
+    const { setSessionId, setConnected, setARIAState, addTranscript, updateLastARIA, incrementActionCount, pushToast, setBrowserFrame, setLastClickPos } = useARIAStore.getState()
     try {
       const { session_id } = await api.createSession()
       setSessionId(session_id)
 
-      const wsBase = settings.apiUrl.replace(/^http/, 'ws')
-      const ws = new ARIAWebSocket(session_id, wsBase)
+      const health = await api.health().catch(() => null)
+      if (health && !health.gemini_configured) pushToast('Backend has no GOOGLE_API_KEY — Gemini calls will fail', 'warning')
+      if (health && !health.browser_ready) pushToast('Backend browser unavailable — run `playwright install chromium`', 'warning')
+
+      const ws = new ARIAWebSocket(session_id, wsBaseUrl())
       wsRef.current = ws
 
       ws.onMessage((msg) => {
@@ -23,14 +26,15 @@ export function useARIASession() {
         switch (msg.type) {
           case 'state':
             if (msg.state) setARIAState(msg.state)
+            // Barge-in or manual interrupt: drop whatever audio is still queued
+            if (msg.state === 'interrupted') audioOutput.stop()
             break
           case 'text':
             if (msg.role === 'user') {
               addTranscript({ type: 'user', content: msg.content ?? '', timestamp: Date.now(), final: true })
-            } else if (msg.final) {
-              addTranscript({ type: 'aria', content: msg.content ?? '', timestamp: Date.now(), final: true })
-            } else {
-              updateLastARIA(msg.content ?? '', false)
+            } else if (msg.content) {
+              // Streaming transcript: update the open bubble, close it on final
+              updateLastARIA(msg.content, !!msg.final)
             }
             break
           case 'audio':
@@ -45,12 +49,19 @@ export function useARIASession() {
               timestamp: Date.now(),
             })
             incrementActionCount()
+            if (msg.action === 'click_element' && msg.x != null && msg.y != null) {
+              setLastClickPos({ x: msg.x, y: msg.y })
+            }
+            break
+          case 'browser_frame':
+            if (msg.data) setBrowserFrame(msg.data)
             break
           case 'notification':
             pushToast(msg.message ?? '', msg.level ?? 'info')
             break
           case 'error':
             pushToast(msg.message ?? 'Unknown error', 'error')
+            addTranscript({ type: 'system', content: msg.message ?? 'Unknown error', timestamp: Date.now() })
             break
         }
       })

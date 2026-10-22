@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from agents.tools.browser_tools import browser_controller
+from config import config
 from services.gemini_live import gemini_live_service
 from services.session import session_manager
 from services.vision import vision_service
@@ -112,4 +114,7 @@ async def health():
     return {
         "status": "ok",
         "active_sessions": session_manager.active_count(),
+        "gemini_configured": bool(config.GOOGLE_API_KEY),
+        "browser_ready": browser_controller.ready,
+        "browser_error": browser_controller.last_error,
     }
