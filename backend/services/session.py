@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -6,6 +7,8 @@ from enum import Enum
 from typing import Any
 
 from config import config
+
+logger = logging.getLogger("aria.session")
 
 
 class SessionState(str, Enum):
@@ -26,12 +29,43 @@ class ARIASession:
     task_history: list[dict[str, Any]] = field(default_factory=list)
     browser_context_id: str | None = None
     interrupted: bool = False
+    # Agent runner (ADK memory + browser context). Owned by the session, not by
+    # the WebSocket, so a network blip and reconnect doesn't lose either.
+    runner: Any = None
+    connections: int = 0
+    disconnected_at: float | None = None
+
+    async def close(self):
+        if self.runner is not None:
+            try:
+                await self.runner.stop()
+            except Exception as e:
+                logger.warning(f"Runner stop failed for {self.session_id}: {e}")
+            self.runner = None
 
     def touch(self):
         self.last_active = time.time()
 
     def is_expired(self) -> bool:
-        return (time.time() - self.last_active) > config.SESSION_TTL_SECONDS
+        now = time.time()
+        if (now - self.last_active) > config.SESSION_TTL_SECONDS:
+            return True
+        # Client left and did not come back within the grace period
+        return (
+            self.connections == 0
+            and self.disconnected_at is not None
+            and (now - self.disconnected_at) > config.RECONNECT_GRACE_SECONDS
+        )
+
+    def mark_connected(self):
+        self.connections += 1
+        self.disconnected_at = None
+        self.touch()
+
+    def mark_disconnected(self):
+        self.connections = max(0, self.connections - 1)
+        if self.connections == 0:
+            self.disconnected_at = time.time()
 
     def interrupt(self):
         self.interrupted = True
@@ -56,12 +90,8 @@ class SessionManager:
         self._lock = asyncio.Lock()
 
     async def create(self) -> ARIASession:
+        await self.cleanup_expired()
         async with self._lock:
-            # Evict expired sessions
-            expired = [sid for sid, s in self._sessions.items() if s.is_expired()]
-            for sid in expired:
-                del self._sessions[sid]
-
             if len(self._sessions) >= config.MAX_SESSIONS:
                 raise RuntimeError(
                     f"Max concurrent sessions ({config.MAX_SESSIONS}) reached."
@@ -80,7 +110,26 @@ class SessionManager:
 
     async def delete(self, session_id: str):
         async with self._lock:
-            self._sessions.pop(session_id, None)
+            session = self._sessions.pop(session_id, None)
+        if session:
+            await session.close()
+
+    async def cleanup_expired(self) -> int:
+        """Drop expired sessions and free their browser contexts."""
+        async with self._lock:
+            expired = [s for s in self._sessions.values() if s.is_expired()]
+            for s in expired:
+                del self._sessions[s.session_id]
+        for s in expired:
+            await s.close()
+        return len(expired)
+
+    async def close_all(self):
+        async with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for s in sessions:
+            await s.close()
 
     def active_count(self) -> int:
         return len([s for s in self._sessions.values() if not s.is_expired()])

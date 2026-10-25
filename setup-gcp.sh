@@ -40,6 +40,18 @@ gcloud secrets create aria-google-api-key \
   --replication-policy=automatic \
   --project="$PROJECT_ID" 2>/dev/null || echo "   (already exists)"
 
+# 4b. Access token protecting the deployed app (generated once)
+if gcloud secrets describe aria-access-token --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "→ Access token secret already exists"
+else
+  echo "→ Generating ARIA access token..."
+  ACCESS_TOKEN="$(openssl rand -hex 24)"
+  printf '%s' "$ACCESS_TOKEN" | gcloud secrets create aria-access-token \
+    --replication-policy=automatic --data-file=- --project="$PROJECT_ID"
+  echo "   Your access token (enter it in ARIA → Settings → Access token):"
+  echo "   $ACCESS_TOKEN"
+fi
+
 echo ""
 echo "⚠️  Add your Gemini API key to Secret Manager:"
 echo "   echo -n 'YOUR_API_KEY' | gcloud secrets versions add aria-google-api-key --data-file=-"
@@ -52,6 +64,16 @@ gcloud secrets add-iam-policy-binding aria-google-api-key \
   --member="serviceAccount:$CB_SA" \
   --role="roles/secretmanager.secretAccessor" \
   --project="$PROJECT_ID"
+
+# 5b. Cloud Run's runtime identity (default compute SA) reads the secrets at startup
+RUN_SA="$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
+echo "→ Granting Cloud Run runtime SA access to secrets..."
+for SECRET in aria-google-api-key aria-access-token; do
+  gcloud secrets add-iam-policy-binding "$SECRET" \
+    --member="serviceAccount:$RUN_SA" \
+    --role="roles/secretmanager.secretAccessor" \
+    --project="$PROJECT_ID"
+done
 
 # 6. Grant Cloud Build permission to deploy to Cloud Run
 echo "→ Granting Cloud Build SA Cloud Run deploy permissions..."

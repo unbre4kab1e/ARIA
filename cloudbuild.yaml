@@ -64,25 +64,32 @@ steps:
       - --cpu=2
       - --concurrency=10
       - --timeout=3600
+      # Sessions live in memory: keep one instance so REST + WebSocket hit the same one
+      - --max-instances=1
+      - --session-affinity
       - --set-env-vars=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${_REGION},BROWSER_HEADLESS=true
-      - --set-secrets=GOOGLE_API_KEY=aria-google-api-key:latest
+      - --set-secrets=GOOGLE_API_KEY=aria-google-api-key:latest,ACCESS_TOKEN=aria-access-token:latest
     waitFor: [push-backend]
 
   # ── 5. Deploy frontend to Cloud Run ─────────────────────────────────────────
+  # nginx proxies /api and /ws to the backend URL resolved here
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: deploy-frontend
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - deploy
-      - "${_FRONTEND_SERVICE}"
-      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_FRONTEND_SERVICE}:${SHORT_SHA}
-      - --region=${_REGION}
-      - --platform=managed
-      - --allow-unauthenticated
-      - --memory=256Mi
-      - --cpu=1
-    waitFor: [push-frontend]
+      - -c
+      - |
+        BACKEND_URL=$(gcloud run services describe ${_BACKEND_SERVICE} --region=${_REGION} --format='value(status.url)')
+        gcloud run deploy ${_FRONTEND_SERVICE} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_FRONTEND_SERVICE}:${SHORT_SHA} \
+          --region=${_REGION} \
+          --platform=managed \
+          --allow-unauthenticated \
+          --memory=256Mi \
+          --cpu=1 \
+          --timeout=3600 \
+          --set-env-vars=BACKEND_URL=$${BACKEND_URL}
+    waitFor: [push-frontend, deploy-backend]
 
 images:
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_BACKEND_SERVICE}:${SHORT_SHA}"

@@ -1,11 +1,16 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from agents.tools.browser_tools import browser_controller
+from api.auth import require_token
+from config import config
 from services.gemini_live import gemini_live_service
 from services.session import session_manager
+from services.startup_check import gemini_status
 from services.vision import vision_service
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
+public_router = APIRouter(prefix="/api")
 
 
 # ─── Session ──────────────────────────────────────────────────────────────────
@@ -107,9 +112,14 @@ async def text_query(req: TextQueryRequest):
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 
-@router.get("/health")
+@public_router.get("/health")
 async def health():
     return {
         "status": "ok",
         "active_sessions": session_manager.active_count(),
+        "auth_required": bool(config.ACCESS_TOKEN),
+        "gemini_configured": bool(config.GOOGLE_API_KEY),
+        "gemini_status": gemini_status["status"],
+        "browser_ready": browser_controller.ready,
+        "browser_error": browser_controller.last_error,
     }

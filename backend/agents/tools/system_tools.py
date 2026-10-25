@@ -1,6 +1,8 @@
 import time
 
-from google.adk.tools import FunctionTool
+from google.adk.tools import FunctionTool, ToolContext
+
+from services.session import session_manager
 
 
 async def get_current_time() -> dict:
@@ -8,10 +10,12 @@ async def get_current_time() -> dict:
     return {"utc_timestamp": time.time(), "human": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}
 
 
-async def summarize_task_history(history: list[dict]) -> str:
+async def summarize_task_history(tool_context: ToolContext) -> str:
     """
-    Summarize a list of task history entries into a short human-readable string.
+    Summarize the last actions and messages of the current session.
     """
+    session = await session_manager.get(tool_context.state.get("aria_session_id", ""))
+    history = session.task_history if session else []
     if not history:
         return "No previous actions."
     lines = []
@@ -23,8 +27,7 @@ async def summarize_task_history(history: list[dict]) -> str:
 
 async def notify_user(message: str, level: str = "info") -> dict:
     """
-    Emit a notification to the frontend (info | warning | success | error).
-    This is a signal that will be forwarded via WebSocket.
+    Show a toast notification to the user (level: info | warning | success | error).
     """
     return {"notification": message, "level": level, "timestamp": time.time()}
 

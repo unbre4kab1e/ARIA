@@ -17,6 +17,7 @@ export interface ToastItem {
 
 export interface ARIASettings {
   apiUrl: string
+  accessToken: string
   micSensitivity: number
   screenshotIntervalMs: number
   voiceEnabled: boolean
@@ -27,6 +28,7 @@ interface ARIAStore {
   // Session
   sessionId: string | null
   connected: boolean
+  reconnecting: boolean
   ariaState: ARIAState
   actionCount: number
   sessionStartTime: number | null
@@ -34,6 +36,8 @@ interface ARIAStore {
   transcript: TranscriptEntry[]
   // Screen
   lastScreenshot: string | null
+  browserFrame: string | null
+  browserPage: { url: string; title: string } | null
   screenShareActive: boolean
   lastClickPos: { x: number; y: number } | null
   // Mic
@@ -49,10 +53,12 @@ interface ARIAStore {
   // Actions
   setSessionId: (id: string | null) => void
   setConnected: (v: boolean) => void
+  setReconnecting: (v: boolean) => void
   setARIAState: (s: ARIAState) => void
   addTranscript: (entry: Omit<TranscriptEntry, 'id'>) => void
   updateLastARIA: (content: string, final: boolean) => void
   setLastScreenshot: (b64: string | null) => void
+  setBrowserFrame: (b64: string | null, page?: { url: string; title: string }) => void
   setScreenShareActive: (v: boolean) => void
   setLastClickPos: (pos: { x: number; y: number } | null) => void
   setMicActive: (v: boolean) => void
@@ -65,8 +71,15 @@ interface ARIAStore {
   reset: () => void
 }
 
+const LEGACY_API_URLS = ['http://127.0.0.1:8888', 'http://localhost:8888']
+
 const loadSettings = (): Partial<ARIASettings> => {
-  try { return JSON.parse(localStorage.getItem('aria_settings') || '{}') } catch { return {} }
+  try {
+    const stored: Partial<ARIASettings> = JSON.parse(localStorage.getItem('aria_settings') || '{}')
+    // Old builds hard-coded a port the backend never used: fall back to same-origin
+    if (stored.apiUrl && LEGACY_API_URLS.includes(stored.apiUrl)) stored.apiUrl = ''
+    return stored
+  } catch { return {} }
 }
 
 let _toastId = 0
@@ -74,17 +87,21 @@ let _toastId = 0
 export const useARIAStore = create<ARIAStore>((set, get) => ({
   sessionId: null,
   connected: false,
+  reconnecting: false,
   ariaState: 'idle',
   actionCount: 0,
   sessionStartTime: null,
   transcript: [],
   lastScreenshot: null,
+  browserFrame: null,
+  browserPage: null,
   screenShareActive: false,
   lastClickPos: null,
   micActive: false,
   settings: {
-    apiUrl: 'http://127.0.0.1:8888',
-    micSensitivity: 0.7,
+    apiUrl: '',
+    accessToken: '',
+    micSensitivity: 0.5,
     screenshotIntervalMs: 2000,
     voiceEnabled: true,
     theme: 'dark',
@@ -96,6 +113,7 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
 
   setSessionId: (id) => set({ sessionId: id, sessionStartTime: id ? Date.now() : null }),
   setConnected: (v) => set({ connected: v }),
+  setReconnecting: (v) => set({ reconnecting: v }),
   setARIAState: (s) => set({ ariaState: s }),
 
   addTranscript: (entry) =>
@@ -109,7 +127,9 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
   updateLastARIA: (content, final) =>
     set((state) => {
       const list = [...state.transcript]
-      const idx = list.findLastIndex((e) => e.type === 'aria' && !e.final)
+      // Only continue a streaming bubble if nothing else was posted after it
+      const last = list.length - 1
+      const idx = last >= 0 && list[last].type === 'aria' && !list[last].final ? last : -1
       if (idx >= 0) {
         list[idx] = { ...list[idx], content, final }
         return { transcript: list }
@@ -117,12 +137,13 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
       return {
         transcript: [
           ...list,
-          { id: `t-${Date.now()}`, type: 'aria', content, timestamp: Date.now(), final },
+          { id: `t-${Date.now()}-${_toastId++}`, type: 'aria', content, timestamp: Date.now(), final },
         ],
       }
     }),
 
   setLastScreenshot: (b64) => set({ lastScreenshot: b64 }),
+  setBrowserFrame: (b64, page) => set((s) => ({ browserFrame: b64, browserPage: page ?? s.browserPage })),
   setScreenShareActive: (v) => set({ screenShareActive: v }),
   setLastClickPos: (pos) => set({ lastClickPos: pos }),
   setMicActive: (v) => set({ micActive: v }),
@@ -139,8 +160,7 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
   setSettings: (partial) =>
     set((s) => {
       const next = { ...s.settings, ...partial }
-      localStorage.setItem('aria_settings', JSON.stringify(next))
-      if (partial.apiUrl) localStorage.setItem('aria_api_url', partial.apiUrl)
+      try { localStorage.setItem('aria_settings', JSON.stringify(next)) } catch { /* storage unavailable */ }
       return { settings: next }
     }),
 
@@ -155,11 +175,14 @@ export const useARIAStore = create<ARIAStore>((set, get) => ({
     set({
       sessionId: null,
       connected: false,
+      reconnecting: false,
       ariaState: 'idle',
       actionCount: 0,
       sessionStartTime: null,
       transcript: [],
       lastScreenshot: null,
+      browserFrame: null,
+      browserPage: null,
       screenShareActive: false,
       lastClickPos: null,
       micActive: false,

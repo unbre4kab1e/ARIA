@@ -12,9 +12,11 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from agents.tools.browser_tools import browser_controller
-from api.routes import router
+from api.routes import public_router, router
 from api.websocket import handle_websocket
 from config import config
+from services.session import session_manager
+from services.startup_check import check_gemini
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,13 +27,31 @@ logging.getLogger("aria").setLevel(logging.DEBUG)
 logger = logging.getLogger("aria")
 
 
+async def _cleanup_loop():
+    """Free browser contexts of sessions nobody came back to."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            evicted = await session_manager.cleanup_expired()
+            if evicted:
+                logger.info(f"Evicted {evicted} expired session(s).")
+        except Exception as e:
+            logger.warning(f"Session cleanup failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting ARIA backend...")
+    if not config.ACCESS_TOKEN:
+        logger.warning("ACCESS_TOKEN is not set — anyone reaching this server can use it.")
+    check_task = asyncio.create_task(check_gemini())
+    cleanup_task = asyncio.create_task(_cleanup_loop())
     await browser_controller.start()
-    logger.info("Playwright browser started.")
     yield
     logger.info("Shutting down ARIA backend...")
+    check_task.cancel()
+    cleanup_task.cancel()
+    await session_manager.close_all()
     await browser_controller.stop()
     logger.info("Playwright browser stopped.")
 
@@ -45,12 +65,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
-    allow_credentials=True,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(public_router)
 app.include_router(router)
 
 

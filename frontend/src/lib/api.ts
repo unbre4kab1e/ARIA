@@ -1,10 +1,32 @@
-const BASE_URL = () => localStorage.getItem('aria_api_url') || 'http://127.0.0.1:8888'
+import { useARIAStore } from '../store/ariaStore'
+
+/** Backend base URL. Empty = same origin (Vite dev proxy / nginx in Docker). */
+export const apiBaseUrl = () => useARIAStore.getState().settings.apiUrl.trim().replace(/\/+$/, '')
+
+/** WebSocket base URL derived from the API URL (or from the page origin). */
+export const wsBaseUrl = () => {
+  const base = apiBaseUrl()
+  if (base) return base.replace(/^http/, 'ws')
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
+}
+
+const BASE_URL = apiBaseUrl
+
+export const accessToken = () => useARIAStore.getState().settings.accessToken.trim()
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = accessToken()
   const res = await fetch(`${BASE_URL()}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { 'X-ARIA-Token': token } : {}),
+      ...options?.headers,
+    },
   })
+  if (res.status === 401) {
+    throw new Error('Access token missing or wrong — set it in Settings')
+  }
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`API ${path} (${res.status}): ${err}`)
@@ -42,5 +64,13 @@ export const api = {
     }),
 
   health: () =>
-    request<{ status: string; active_sessions: number }>('/api/health'),
+    request<{
+      status: string
+      active_sessions: number
+      auth_required: boolean
+      gemini_configured: boolean
+      gemini_status: string
+      browser_ready: boolean
+      browser_error: string | null
+    }>('/api/health'),
 }

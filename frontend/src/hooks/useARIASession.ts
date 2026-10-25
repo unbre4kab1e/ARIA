@@ -1,5 +1,5 @@
 import { useCallback, useRef } from 'react'
-import { api } from '../lib/api'
+import { accessToken, api, wsBaseUrl } from '../lib/api'
 import { ARIAWebSocket } from '../lib/websocket'
 import { useARIAStore } from '../store/ariaStore'
 import { useAudioOutput } from './useAudioOutput'
@@ -9,13 +9,18 @@ export function useARIASession() {
   const audioOutput = useAudioOutput()
 
   const connect = useCallback(async () => {
-    const { setSessionId, setConnected, setARIAState, addTranscript, updateLastARIA, incrementActionCount, pushToast, settings } = useARIAStore.getState()
+    const { setSessionId, setConnected, setReconnecting, setARIAState, addTranscript, updateLastARIA, incrementActionCount, pushToast, setBrowserFrame, setLastClickPos } = useARIAStore.getState()
     try {
+      const health = await api.health().catch(() => null)
+      if (health && health.gemini_status !== 'ok' && health.gemini_status !== 'pending') {
+        pushToast(`Gemini: ${health.gemini_status}`, 'error')
+      }
+      if (health && !health.browser_ready) pushToast('Backend browser unavailable — run `playwright install chromium`', 'warning')
+
       const { session_id } = await api.createSession()
       setSessionId(session_id)
 
-      const wsBase = settings.apiUrl.replace(/^http/, 'ws')
-      const ws = new ARIAWebSocket(session_id, wsBase)
+      const ws = new ARIAWebSocket(session_id, wsBaseUrl(), accessToken())
       wsRef.current = ws
 
       ws.onMessage((msg) => {
@@ -23,14 +28,15 @@ export function useARIASession() {
         switch (msg.type) {
           case 'state':
             if (msg.state) setARIAState(msg.state)
+            // Barge-in or manual interrupt: drop whatever audio is still queued
+            if (msg.state === 'interrupted') audioOutput.stop()
             break
           case 'text':
             if (msg.role === 'user') {
               addTranscript({ type: 'user', content: msg.content ?? '', timestamp: Date.now(), final: true })
-            } else if (msg.final) {
-              addTranscript({ type: 'aria', content: msg.content ?? '', timestamp: Date.now(), final: true })
-            } else {
-              updateLastARIA(msg.content ?? '', false)
+            } else if (msg.content) {
+              // Streaming transcript: update the open bubble, close it on final
+              updateLastARIA(msg.content, !!msg.final)
             }
             break
           case 'audio':
@@ -45,13 +51,38 @@ export function useARIASession() {
               timestamp: Date.now(),
             })
             incrementActionCount()
+            if (msg.action === 'click_element' && msg.x != null && msg.y != null) {
+              setLastClickPos({ x: msg.x, y: msg.y })
+            }
+            break
+          case 'browser_frame':
+            if (msg.data) setBrowserFrame(msg.data, { url: msg.url ?? '', title: msg.title ?? '' })
             break
           case 'notification':
             pushToast(msg.message ?? '', msg.level ?? 'info')
             break
           case 'error':
             pushToast(msg.message ?? 'Unknown error', 'error')
+            addTranscript({ type: 'system', content: msg.message ?? 'Unknown error', timestamp: Date.now() })
             break
+        }
+      })
+
+      ws.onStatus((status) => {
+        if (status.kind === 'open') {
+          setReconnecting(false)
+        } else if (status.kind === 'reconnecting') {
+          setReconnecting(true)
+        } else {
+          // The server won't take this session back: start over cleanly
+          wsRef.current = null
+          useARIAStore.getState().reset()
+          pushToast(
+            status.reason === 'unauthorized'
+              ? 'Access token missing or wrong — set it in Settings'
+              : 'Session expired — start a new one',
+            'warning',
+          )
         }
       })
 
